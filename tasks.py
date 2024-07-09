@@ -2,9 +2,10 @@ import sqlite3
 from datetime import datetime, timedelta
 from InquirerPy import prompt
 import time
-
+from colorama import Fore, Style, init
 
 DB_FILE = 'tasks.db'
+init(autoreset=True)
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -15,6 +16,8 @@ def init_db():
             name TEXT NOT NULL,
             due_date TEXT NOT NULL,
             due_time TEXT NOT NULL,
+            priority TEXT NOT NULL,
+            tags TEXT,
             completed INTEGER NOT NULL DEFAULT 0,
             repeatable INTEGER NOT NULL DEFAULT 0,
             repeat_interval TEXT,
@@ -26,14 +29,19 @@ def init_db():
 
 def validate_date(date_text):
     try:
-        datetime.strptime(date_text, "%Y-%m-%d")
+        date = datetime.strptime(date_text, "%Y-%m-%d")
+        if date.date() < datetime.now().date():
+            return False
         return True
     except ValueError:
         return False
 
-def validate_time(hour, minute):
+def validate_time(hour, minute, period, date):
     try:
         if 1 <= int(hour) <= 12 and 0 <= int(minute) <= 59:
+            task_datetime = datetime.strptime(f"{date} {hour}:{minute} {period}", "%Y-%m-%d %I:%M %p")
+            if task_datetime < datetime.now():
+                return False
             return True
         else:
             return False
@@ -44,37 +52,58 @@ def add_task():
     current_datetime = datetime.now()
     current_date = current_datetime.strftime("%Y-%m-%d")
 
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('SELECT DISTINCT tags FROM tasks')
+    all_tags = set()
+    for row in cursor.fetchall():
+        all_tags.update(filter(None, row[0].split(',')))
+
+    all_tags = list(all_tags)
+
+    conn.close()
+
     questions = [
         {'type': 'input', 'name': 'name', 'message': 'Enter the task name:'},
         {'type': 'input', 'name': 'due_date', 'message': f'Enter the due date (YYYY-MM-DD) or leave blank (current: {current_date}):', 'default': current_date},
         {'type': 'input', 'name': 'due_hour', 'message': 'Enter the due hour (1-12) or leave blank:', 'default': '12'},
         {'type': 'input', 'name': 'due_minute', 'message': 'Enter the due minute (00-59) or leave blank:', 'default': '00'},
         {'type': 'list', 'name': 'due_period', 'message': 'Select AM/PM:', 'choices': ['AM', 'PM']},
+        {'type': 'list', 'name': 'priority', 'message': 'Select task priority:', 'choices': ['Low', 'Medium', 'High']},
+        {'type': 'checkbox', 'name': 'tags', 'message': 'Select tags (multiple allowed) or create new:', 'choices': all_tags + ["Create new tag"] + ["No tag"]},
         {'type': 'confirm', 'name': 'repeatable', 'message': 'Is the task repeatable?', 'default': False},
         {'type': 'list', 'name': 'repeat_interval', 'message': 'Select repeat interval:', 'choices': ['Daily', 'Weekly'], 'when': lambda answers: answers['repeatable']}
     ]
     answers = prompt(questions)
-    
-    if not validate_date(answers['due_date']):
-        print("Invalid date format. Please use YYYY-MM-DD.")
 
+    if "Create new tag" in answers['tags']:
+        new_tag_question = [
+            {'type': 'input', 'name': 'new_tag', 'message': 'Enter the new tag:'}
+        ]
+        new_tag_answer = prompt(new_tag_question)
+        answers['tags'].remove("Create new tag")
+        answers['tags'].append(new_tag_answer['new_tag'])
+
+    if not validate_date(answers['due_date']):
+        print("Invalid date format or date is in the past. Please use YYYY-MM-DD.")
         return
-    
-    if not validate_time(answers['due_hour'], answers['due_minute']):
-        print("Invalid time format.")
+
+    if not validate_time(answers['due_hour'], answers['due_minute'], answers['due_period'], answers['due_date']):
+        print("Invalid time format or time is in the past.")
         return
 
     due_hour = int(answers['due_hour'])
     due_minute = int(answers['due_minute'])
     due_time = format_time(due_hour, due_minute, answers['due_period'])
+    tags = ",".join(answers['tags'])
 
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO tasks (name, due_date, due_time, repeatable, repeat_interval, completed_dates)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (answers['name'], answers['due_date'], due_time, int(answers['repeatable']), answers.get('repeat_interval', None), ""))
+            INSERT INTO tasks (name, due_date, due_time, priority, tags, repeatable, repeat_interval, completed_dates)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (answers['name'], answers['due_date'], due_time, answers['priority'], tags, int(answers['repeatable']), answers.get('repeat_interval', None), ""))
         conn.commit()
         conn.close()
         print(f'Task "{answers["name"]}" added.')
@@ -131,8 +160,8 @@ def complete_task():
                 next_due_date += timedelta(days=7)
             next_due_date_str = next_due_date.strftime("%Y-%m-%d")
             cursor.execute('''
-                INSERT INTO tasks (name, due_date, due_time, repeatable, repeat_interval, completed_dates)
-                SELECT name, ?, due_time, repeatable, repeat_interval, ""
+                INSERT INTO tasks (name, due_date, due_time, priority, tags, repeatable, repeat_interval, completed_dates)
+                SELECT name, ?, due_time, priority, tags, repeatable, repeat_interval, ""
                 FROM tasks WHERE id = ?
             ''', (next_due_date_str, task_id))
 
@@ -146,8 +175,43 @@ def list_tasks():
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('SELECT name, due_date, due_time FROM tasks WHERE completed = 0')
+
+        cursor.execute('SELECT DISTINCT tags FROM tasks')
+        all_tags = set()
+        for row in cursor.fetchall():
+            all_tags.update(filter(None, row[0].split(',')))
+
+        all_tags = list(all_tags)
+        if not all_tags:
+            all_tags.append("No tags")
+
+        questions = [
+            {'type': 'list', 'name': 'filter_priority', 'message': 'Filter by priority:', 'choices': ['All', 'Low', 'Medium', 'High'], 'default': 'All'},
+            {'type': 'checkbox', 'name': 'filter_tags', 'message': 'Filter by tags (select multiple):', 'choices': all_tags}
+        ]
+        answers = prompt(questions)
+        filter_priority = answers['filter_priority'] if answers['filter_priority'] != 'All' else None
+        filter_tags = answers['filter_tags']
+
+        query = 'SELECT name, due_date, due_time, priority, tags FROM tasks WHERE completed = 0'
+        params = []
+
+        if filter_priority:
+            query += ' AND priority = ?'
+            params.append(filter_priority)
+        if filter_tags:
+            tag_conditions = []
+            for tag in filter_tags:
+                if tag == "No tags":
+                    tag_conditions.append('tags IS NULL OR tags = ""')
+                else:
+                    tag_conditions.append('tags LIKE ?')
+                    params.append(f"%{tag}%")
+            query += ' AND (' + ' OR '.join(tag_conditions) + ')'
+
+        cursor.execute(query, params)
         pending_tasks = cursor.fetchall()
+
         cursor.execute('SELECT name, completed_dates FROM tasks WHERE completed = 1')
         completed_tasks = cursor.fetchall()
         conn.close()
@@ -155,10 +219,20 @@ def list_tasks():
         print(f"An error occurred: {e}")
         return
 
+    def get_color(priority):
+        if priority == 'High':
+            return Fore.RED
+        elif priority == 'Medium':
+            return Fore.YELLOW
+        elif priority == 'Low':
+            return Fore.GREEN
+        return Style.RESET_ALL
+
     print("Pending Tasks:")
     for task in pending_tasks:
         due_date_str = f" (Due: {task[1]} {task[2]})" if task[1] and task[2] else ""
-        print(f" - {task[0]}{due_date_str}")
+        task_color = get_color(task[3])
+        print(f"{task_color} - {task[0]}{due_date_str} [Priority: {task[3]}] [Tags: {task[4]}]")
 
     print("\nCompleted Tasks:")
     for task in completed_tasks:
@@ -238,4 +312,7 @@ def main():
         time.sleep(2)
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nProcess interrupted. Exiting.")
