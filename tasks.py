@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from InquirerPy import prompt
 import time
 
+
 DB_FILE = 'tasks.db'
 
 def init_db():
@@ -23,6 +24,22 @@ def init_db():
     conn.commit()
     conn.close()
 
+def validate_date(date_text):
+    try:
+        datetime.strptime(date_text, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+def validate_time(hour, minute):
+    try:
+        if 1 <= int(hour) <= 12 and 0 <= int(minute) <= 59:
+            return True
+        else:
+            return False
+    except ValueError:
+        return False
+
 def add_task():
     current_datetime = datetime.now()
     current_date = current_datetime.strftime("%Y-%m-%d")
@@ -37,26 +54,43 @@ def add_task():
         {'type': 'list', 'name': 'repeat_interval', 'message': 'Select repeat interval:', 'choices': ['Daily', 'Weekly'], 'when': lambda answers: answers['repeatable']}
     ]
     answers = prompt(questions)
-    due_hour = int(answers['due_hour']) if answers['due_hour'] else 12
-    due_minute = int(answers['due_minute']) if answers['due_minute'] else 0
+    
+    if not validate_date(answers['due_date']):
+        print("Invalid date format. Please use YYYY-MM-DD.")
+
+        return
+    
+    if not validate_time(answers['due_hour'], answers['due_minute']):
+        print("Invalid time format.")
+        return
+
+    due_hour = int(answers['due_hour'])
+    due_minute = int(answers['due_minute'])
     due_time = format_time(due_hour, due_minute, answers['due_period'])
 
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO tasks (name, due_date, due_time, repeatable, repeat_interval, completed_dates)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (answers['name'], answers['due_date'], due_time, int(answers['repeatable']), answers.get('repeat_interval', None), ""))
-    conn.commit()
-    conn.close()
-    print(f'Task "{answers["name"]}" added.')
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO tasks (name, due_date, due_time, repeatable, repeat_interval, completed_dates)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (answers['name'], answers['due_date'], due_time, int(answers['repeatable']), answers.get('repeat_interval', None), ""))
+        conn.commit()
+        conn.close()
+        print(f'Task "{answers["name"]}" added.')
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
 
 def complete_task():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('SELECT id, name FROM tasks WHERE completed = 0')
-    tasks = cursor.fetchall()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, name FROM tasks WHERE completed = 0')
+        tasks = cursor.fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
+        return
 
     if not tasks:
         print("No tasks to complete.")
@@ -73,46 +107,53 @@ def complete_task():
             task_id = task[0]
             break
 
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('SELECT completed_dates, repeatable, repeat_interval, due_date FROM tasks WHERE id = ?', (task_id,))
-    task = cursor.fetchone()
-    completed_dates = task[0] + ("," if task[0] else "") + completion_datetime
-    repeatable = task[1]
-    repeat_interval = task[2]
-    due_date = task[3]
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT completed_dates, repeatable, repeat_interval, due_date FROM tasks WHERE id = ?', (task_id,))
+        task = cursor.fetchone()
+        completed_dates = task[0] + ("," if task[0] else "") + completion_datetime
+        repeatable = task[1]
+        repeat_interval = task[2]
+        due_date = task[3]
 
-    cursor.execute('''
-        UPDATE tasks
-        SET completed = 1, completed_dates = ?
-        WHERE id = ?
-    ''', (completed_dates, task_id))
-
-    if repeatable and repeat_interval:
-        next_due_date = datetime.strptime(due_date, "%Y-%m-%d")
-        if repeat_interval == 'Daily':
-            next_due_date += timedelta(days=1)
-        elif repeat_interval == 'Weekly':
-            next_due_date += timedelta(days=7)
-        next_due_date_str = next_due_date.strftime("%Y-%m-%d")
         cursor.execute('''
-            INSERT INTO tasks (name, due_date, due_time, repeatable, repeat_interval, completed_dates)
-            SELECT name, ?, due_time, repeatable, repeat_interval, ""
-            FROM tasks WHERE id = ?
-        ''', (next_due_date_str, task_id))
+            UPDATE tasks
+            SET completed = 1, completed_dates = ?
+            WHERE id = ?
+        ''', (completed_dates, task_id))
 
-    conn.commit()
-    conn.close()
-    print(f'Task "{task_name}" marked as completed.')
+        if repeatable and repeat_interval:
+            next_due_date = datetime.strptime(due_date, "%Y-%m-%d")
+            if repeat_interval == 'Daily':
+                next_due_date += timedelta(days=1)
+            elif repeat_interval == 'Weekly':
+                next_due_date += timedelta(days=7)
+            next_due_date_str = next_due_date.strftime("%Y-%m-%d")
+            cursor.execute('''
+                INSERT INTO tasks (name, due_date, due_time, repeatable, repeat_interval, completed_dates)
+                SELECT name, ?, due_time, repeatable, repeat_interval, ""
+                FROM tasks WHERE id = ?
+            ''', (next_due_date_str, task_id))
+
+        conn.commit()
+        conn.close()
+        print(f'Task "{task_name}" marked as completed.')
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
 
 def list_tasks():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('SELECT name, due_date, due_time FROM tasks WHERE completed = 0')
-    pending_tasks = cursor.fetchall()
-    cursor.execute('SELECT name, completed_dates FROM tasks WHERE completed = 1')
-    completed_tasks = cursor.fetchall()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT name, due_date, due_time FROM tasks WHERE completed = 0')
+        pending_tasks = cursor.fetchall()
+        cursor.execute('SELECT name, completed_dates FROM tasks WHERE completed = 1')
+        completed_tasks = cursor.fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
+        return
 
     print("Pending Tasks:")
     for task in pending_tasks:
@@ -125,19 +166,23 @@ def list_tasks():
         print(f" - {task[0]} (Completed on: {completed_dates_str})")
 
 def stats():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM tasks')
-    total_tasks = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM tasks WHERE completed = 1')
-    completed_tasks = cursor.fetchone()[0]
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM tasks')
+        total_tasks = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM tasks WHERE completed = 1')
+        completed_tasks = cursor.fetchone()[0]
 
-    print(f'Total tasks: {total_tasks}')
-    print(f'Completed tasks: {completed_tasks}')
+        print(f'Total tasks: {total_tasks}')
+        print(f'Completed tasks: {completed_tasks}')
 
-    cursor.execute('SELECT name, due_date, due_time, completed_dates FROM tasks WHERE completed = 1')
-    completed_tasks_data = cursor.fetchall()
-    conn.close()
+        cursor.execute('SELECT name, due_date, due_time, completed_dates FROM tasks WHERE completed = 1')
+        completed_tasks_data = cursor.fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
+        return
 
     late_tasks_count = 0
     current_datetime = datetime.now()
@@ -152,6 +197,17 @@ def stats():
                 break
     print(f'Total late tasks: {late_tasks_count}')
 
+def cleanup_completed_tasks():
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM tasks WHERE completed = 1')
+        conn.commit()
+        conn.close()
+        print("All completed tasks have been removed.")
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
+
 def format_time(hour, minute, period):
     if period == "PM" and hour != 12:
         hour += 12
@@ -163,7 +219,7 @@ def main():
     init_db()
     while True:
         questions = [
-            {'type': 'list', 'name': 'choice', 'message': 'Task Reminder CLI Tool', 'choices': ['Add a task', 'Complete a task', 'List all tasks', 'Show task statistics', 'Exit']}
+            {'type': 'list', 'name': 'choice', 'message': 'Task Reminder CLI Tool', 'choices': ['Add a task', 'Complete a task', 'List all tasks', 'Show task statistics', 'Remove completed tasks', 'Exit']}
         ]
         choice = prompt(questions)['choice']
         
@@ -175,6 +231,8 @@ def main():
             list_tasks()
         elif choice == 'Show task statistics':
             stats()
+        elif choice == 'Remove completed tasks':
+            cleanup_completed_tasks()
         elif choice == 'Exit':
             break
         time.sleep(2)
