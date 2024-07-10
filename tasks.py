@@ -3,6 +3,9 @@ from datetime import datetime, timedelta
 from InquirerPy import prompt
 import time
 from colorama import Fore, Style, init
+import matplotlib.pyplot as plt
+from collections import defaultdict
+
 
 DB_FILE = 'tasks.db'
 init(autoreset=True)
@@ -70,19 +73,34 @@ def add_task():
         {'type': 'input', 'name': 'due_minute', 'message': 'Enter the due minute (00-59) or leave blank:', 'default': '00'},
         {'type': 'list', 'name': 'due_period', 'message': 'Select AM/PM:', 'choices': ['AM', 'PM']},
         {'type': 'list', 'name': 'priority', 'message': 'Select task priority:', 'choices': ['Low', 'Medium', 'High']},
-        {'type': 'checkbox', 'name': 'tags', 'message': 'Select tags (multiple allowed) or create new:', 'choices': all_tags + ["Create new tag"] + ["No tag"]},
+        {'type': 'checkbox', 'name': 'tags', 'message': 'Select tags or create new (press tab to select and press tab again to deselect):', 'choices': all_tags + ["Create new tag", "No tag"]},
         {'type': 'confirm', 'name': 'repeatable', 'message': 'Is the task repeatable?', 'default': False},
         {'type': 'list', 'name': 'repeat_interval', 'message': 'Select repeat interval:', 'choices': ['Daily', 'Weekly'], 'when': lambda answers: answers['repeatable']}
     ]
     answers = prompt(questions)
 
-    if "Create new tag" in answers['tags']:
-        new_tag_question = [
-            {'type': 'input', 'name': 'new_tag', 'message': 'Enter the new tag:'}
-        ]
-        new_tag_answer = prompt(new_tag_question)
-        answers['tags'].remove("Create new tag")
-        answers['tags'].append(new_tag_answer['new_tag'])
+    selected_tags = []
+    if "No tag" not in answers['tags']:
+        create_new = "Create new tag" in answers['tags']
+        for tag in answers['tags']:
+            if tag != "Create new tag":
+                selected_tags.append(tag)
+        
+        while create_new:
+            new_tag_question = [
+                {'type': 'input', 'name': 'new_tag', 'message': 'Enter the new tag:'}
+            ]
+            new_tag_answer = prompt(new_tag_question)
+            if new_tag_answer['new_tag']:
+                selected_tags.append(new_tag_answer['new_tag'])
+                create_another_question = [
+                    {'type': 'confirm', 'name': 'create_another', 'message': 'Create another tag?', 'default': False}
+                ]
+                create_another = prompt(create_another_question)['create_another']
+                if not create_another:
+                    create_new = False
+            else:
+                create_new = False
 
     if not validate_date(answers['due_date']):
         print("Invalid date format or date is in the past. Please use YYYY-MM-DD.")
@@ -95,7 +113,7 @@ def add_task():
     due_hour = int(answers['due_hour'])
     due_minute = int(answers['due_minute'])
     due_time = format_time(due_hour, due_minute, answers['due_period'])
-    tags = ",".join(answers['tags'])
+    tags = ",".join(selected_tags) if selected_tags else ""
 
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -289,11 +307,146 @@ def format_time(hour, minute, period):
         hour = 0
     return f"{hour:02}:{minute:02}"
 
+def generate_completion_graph():
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT completed_dates FROM tasks WHERE completed = 1')
+        completed_dates = cursor.fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
+        return
+
+    date_counts = defaultdict(int)
+    for dates in completed_dates:
+        for date_str in dates[0].split(','):
+            date = datetime.strptime(date_str.strip(), "%Y-%m-%d %I:%M %p").date()
+            date_counts[date] += 1
+
+    dates = sorted(date_counts.keys())
+    counts = [date_counts[date] for date in dates]
+
+    plt.figure(figsize=(12, 6))
+    plt.bar(dates, counts)
+    plt.title('Tasks Completed per Day')
+    plt.xlabel('Date')
+    plt.ylabel('Number of Tasks Completed')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+def edit_task():
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, name FROM tasks WHERE completed = 0')
+        tasks = cursor.fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
+        return
+
+    if not tasks:
+        print("No tasks to edit.")
+        return
+
+    task_choices = [f"{task[0]}: {task[1]}" for task in tasks]
+    questions = [{'type': 'list', 'name': 'task', 'message': 'Select the task to edit:', 'choices': task_choices}]
+    answer = prompt(questions)
+    task_id = int(answer['task'].split(':')[0])
+
+    edit_questions = [
+        {'type': 'input', 'name': 'name', 'message': 'Enter new task name (leave blank to keep current):'},
+        {'type': 'input', 'name': 'due_date', 'message': 'Enter new due date (YYYY-MM-DD) (leave blank to keep current):'},
+        {'type': 'input', 'name': 'due_time', 'message': 'Enter new due time (HH:MM) (leave blank to keep current):'},
+        {'type': 'list', 'name': 'priority', 'message': 'Select new priority:', 'choices': ['Low', 'Medium', 'High', 'Keep current']},
+    ]
+    edit_answers = prompt(edit_questions)
+
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        update_fields = []
+        params = []
+        if edit_answers['name']:
+            update_fields.append('name = ?')
+            params.append(edit_answers['name'])
+        if edit_answers['due_date']:
+            update_fields.append('due_date = ?')
+            params.append(edit_answers['due_date'])
+        if edit_answers['due_time']:
+            update_fields.append('due_time = ?')
+            params.append(edit_answers['due_time'])
+        if edit_answers['priority'] != 'Keep current':
+            update_fields.append('priority = ?')
+            params.append(edit_answers['priority'])
+        
+        if update_fields:
+            query = f"UPDATE tasks SET {', '.join(update_fields)} WHERE id = ?"
+            params.append(task_id)
+            cursor.execute(query, params)
+            conn.commit()
+            print("Task updated successfully.")
+        else:
+            print("No changes were made to the task.")
+        
+        conn.close()
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
+
+def view_today_tasks():
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT name, due_time, priority FROM tasks WHERE due_date = ? AND completed = 0', (today,))
+        tasks = cursor.fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
+        return
+
+    if not tasks:
+        print("No tasks due today.")
+        return
+
+    print("Tasks due today:")
+    for task in tasks:
+        print(f" - {task[0]} (Due: {task[1]}) [Priority: {task[2]}]")
+
+def search_tasks():
+    search_question = [{'type': 'input', 'name': 'query', 'message': 'Enter search query:'}]
+    search_answer = prompt(search_question)
+    query = search_answer['query']
+
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT name, due_date, due_time, priority FROM tasks WHERE name LIKE ? AND completed = 0', (f'%{query}%',))
+        tasks = cursor.fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
+        return
+
+    if not tasks:
+        print("No matching tasks found.")
+        return
+
+    print("Matching tasks:")
+    for task in tasks:
+        print(f" - {task[0]} (Due: {task[1]} {task[2]}) [Priority: {task[3]}]")
+
 def main():
     init_db()
     while True:
         questions = [
-            {'type': 'list', 'name': 'choice', 'message': 'Task Reminder CLI Tool', 'choices': ['Add a task', 'Complete a task', 'List all tasks', 'Show task statistics', 'Remove completed tasks', 'Exit']}
+            {'type': 'list', 'name': 'choice', 'message': 'Task Reminder CLI Tool', 'choices': [
+                'Add a task', 'Complete a task', 'Edit a task', 'List all tasks', 'View tasks due today',
+                'Search tasks', 'Show task statistics', 'Generate completion graph', 'Remove completed tasks', 'Exit'
+            ]}
         ]
         choice = prompt(questions)['choice']
         
@@ -301,10 +454,18 @@ def main():
             add_task()
         elif choice == 'Complete a task':
             complete_task()
+        elif choice == 'Edit a task':
+            edit_task()
         elif choice == 'List all tasks':
             list_tasks()
+        elif choice == 'View tasks due today':
+            view_today_tasks()
+        elif choice == 'Search tasks':
+            search_tasks()
         elif choice == 'Show task statistics':
             stats()
+        elif choice == 'Generate completion graph':
+            generate_completion_graph()
         elif choice == 'Remove completed tasks':
             cleanup_completed_tasks()
         elif choice == 'Exit':
