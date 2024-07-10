@@ -5,7 +5,7 @@ import time
 from colorama import Fore, Style, init
 import matplotlib.pyplot as plt
 from collections import defaultdict
-
+import json
 
 DB_FILE = 'tasks.db'
 init(autoreset=True)
@@ -143,49 +143,54 @@ def complete_task():
         print("No tasks to complete.")
         return
 
-    task_choices = [task[1] for task in tasks]
-    questions = [{'type': 'list', 'name': 'name', 'message': 'Select the task to complete:', 'choices': task_choices}]
+    task_choices = [{'name': task[1], 'value': task[0]} for task in tasks]
+    questions = [{'type': 'checkbox', 'name': 'tasks', 'message': 'Select tasks to complete:', 'choices': task_choices}]
     answers = prompt(questions)
-    task_name = answers['name']
-    completion_datetime = datetime.now().strftime("%Y-%m-%d %I:%M %p")
+    selected_task_ids = answers['tasks']
 
-    for task in tasks:
-        if task[1] == task_name:
-            task_id = task[0]
-            break
+    if not selected_task_ids:
+        print("No tasks selected.")
+        return
+
+    completion_datetime = datetime.now().strftime("%Y-%m-%d %I:%M %p")
 
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('SELECT completed_dates, repeatable, repeat_interval, due_date FROM tasks WHERE id = ?', (task_id,))
-        task = cursor.fetchone()
-        completed_dates = task[0] + ("," if task[0] else "") + completion_datetime
-        repeatable = task[1]
-        repeat_interval = task[2]
-        due_date = task[3]
+        
+        for task_id in selected_task_ids:
+            cursor.execute('SELECT completed_dates, repeatable, repeat_interval, due_date, name FROM tasks WHERE id = ?', (task_id,))
+            task = cursor.fetchone()
+            completed_dates = task[0] + ("," if task[0] else "") + completion_datetime
+            repeatable = task[1]
+            repeat_interval = task[2]
+            due_date = task[3]
+            task_name = task[4]
 
-        cursor.execute('''
-            UPDATE tasks
-            SET completed = 1, completed_dates = ?
-            WHERE id = ?
-        ''', (completed_dates, task_id))
-
-        if repeatable and repeat_interval:
-            next_due_date = datetime.strptime(due_date, "%Y-%m-%d")
-            if repeat_interval == 'Daily':
-                next_due_date += timedelta(days=1)
-            elif repeat_interval == 'Weekly':
-                next_due_date += timedelta(days=7)
-            next_due_date_str = next_due_date.strftime("%Y-%m-%d")
             cursor.execute('''
-                INSERT INTO tasks (name, due_date, due_time, priority, tags, repeatable, repeat_interval, completed_dates)
-                SELECT name, ?, due_time, priority, tags, repeatable, repeat_interval, ""
-                FROM tasks WHERE id = ?
-            ''', (next_due_date_str, task_id))
+                UPDATE tasks
+                SET completed = 1, completed_dates = ?
+                WHERE id = ?
+            ''', (completed_dates, task_id))
+
+            if repeatable and repeat_interval:
+                next_due_date = datetime.strptime(due_date, "%Y-%m-%d")
+                if repeat_interval == 'Daily':
+                    next_due_date += timedelta(days=1)
+                elif repeat_interval == 'Weekly':
+                    next_due_date += timedelta(days=7)
+                next_due_date_str = next_due_date.strftime("%Y-%m-%d")
+                cursor.execute('''
+                    INSERT INTO tasks (name, due_date, due_time, priority, tags, repeatable, repeat_interval, completed_dates)
+                    SELECT name, ?, due_time, priority, tags, repeatable, repeat_interval, ""
+                    FROM tasks WHERE id = ?
+                ''', (next_due_date_str, task_id))
+
+            print(f'Task "{task_name}" marked as completed.')
 
         conn.commit()
         conn.close()
-        print(f'Task "{task_name}" marked as completed.')
+        print(f'{len(selected_task_ids)} task(s) marked as completed.')
     except sqlite3.Error as e:
         print(f"An error occurred: {e}")
 
@@ -439,14 +444,165 @@ def search_tasks():
     for task in tasks:
         print(f" - {task[0]} (Due: {task[1]} {task[2]}) [Priority: {task[3]}]")
 
+def generate_completion_graph():
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('SELECT completed_dates FROM tasks WHERE completed = 1')
+        completed_dates = cursor.fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
+        return
+
+    date_counts = defaultdict(int)
+    for dates in completed_dates:
+        for date_str in dates[0].split(','):
+            date = datetime.strptime(date_str.strip(), "%Y-%m-%d %I:%M %p")
+            date_counts[date] += 1
+
+    range_options = [
+        'Today',
+        'This Week',
+        'This Month',
+        'This Year',
+        'Custom Date Range'
+    ]
+
+    range_question = [{'type': 'list', 'name': 'range', 'message': 'Select date range:', 'choices': range_options}]
+    range_answer = prompt(range_question)['range']
+
+    now = datetime.now()
+
+    if range_answer == 'Today':
+        start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_date = start_date + timedelta(days=1)
+        label_format = "%H:00"
+        increment = timedelta(hours=1)
+        title = 'Tasks Completed Today (by hour)'
+    elif range_answer == 'This Week':
+        start_date = now - timedelta(days=now.weekday())
+        start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_date = start_date + timedelta(days=7)
+        label_format = "%a"
+        increment = timedelta(days=1)
+        title = 'Tasks Completed This Week'
+    elif range_answer == 'This Month':
+        start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        end_date = (start_date + timedelta(days=32)).replace(day=1)
+        label_format = "%d"
+        increment = timedelta(days=1)
+        title = 'Tasks Completed This Month'
+    elif range_answer == 'This Year':
+        start_date = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        end_date = start_date.replace(year=start_date.year + 1)
+        label_format = "%b"
+        increment = timedelta(days=30)
+        title = 'Tasks Completed This Year'
+    else:
+        custom_range_questions = [
+            {'type': 'input', 'name': 'start_date', 'message': 'Enter start date (YYYY-MM-DD):'},
+            {'type': 'input', 'name': 'end_date', 'message': 'Enter end date (YYYY-MM-DD):'}
+        ]
+        custom_range = prompt(custom_range_questions)
+        start_date = datetime.strptime(custom_range['start_date'], "%Y-%m-%d")
+        end_date = datetime.strptime(custom_range['end_date'], "%Y-%m-%d") + timedelta(days=1)
+        
+        if (end_date - start_date).days <= 7:
+            label_format = "%a"
+            increment = timedelta(days=1)
+        elif (end_date - start_date).days <= 31:
+            label_format = "%d"
+            increment = timedelta(days=1)
+        else:
+            label_format = "%b"
+            increment = timedelta(days=30)
+        
+        title = f'Tasks Completed from {start_date.date()} to {end_date.date() - timedelta(days=1)}'
+
+    graph_data = []
+    current_date = start_date
+    while current_date < end_date:
+        count = sum(1 for d in date_counts if current_date <= d < current_date + increment)
+        graph_data.append((current_date, count))
+        current_date += increment
+
+    max_count = max(count for _, count in graph_data) if graph_data else 0
+    
+    print(title)
+    print('-' * 50)
+    
+    graph_height = 10
+    for i in range(graph_height, 0, -1):
+        row = ""
+        for _, count in graph_data:
+            if count >= (i / graph_height) * max_count:
+                row += "█"
+            else:
+                row += " "
+        print(f"{row} {i * max_count // graph_height:2d}")
+    x_axis = "".join(date.strftime(label_format)[0] for date, _ in graph_data)
+    print(x_axis)
+    print('-' * 50)
+    for date, _ in graph_data:
+        print(f"{date.strftime(label_format):>3}", end=" ")
+    print()
+    print('-' * 50)
+    for _, count in graph_data:
+        print(f"{count:3d}", end=" ")
+    print()
+
+def settings():
+    current_settings = load_settings()
+    
+    setting_questions = [
+        {'type': 'checkbox', 'name': 'menu_items', 'message': 'Select menu items to display:', 'choices': [
+            'Add a task',
+            'Complete a task',
+            'Edit a task',
+            'List all tasks',
+            'View tasks due today',
+            'Search tasks',
+            'Show task statistics',
+            'Generate completion graph',
+            'Remove completed tasks'
+        ], 'default': current_settings['menu_items']}
+    ]
+    
+    new_settings = prompt(setting_questions)
+    save_settings(new_settings)
+    print("Settings updated successfully.")
+
+def load_settings():
+    try:
+        with open('settings.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {'menu_items': [
+            'Add a task',
+            'Complete a task',
+            'Edit a task',
+            'List all tasks',
+            'View tasks due today',
+            'Search tasks',
+            'Show task statistics',
+            'Generate completion graph',
+            'Remove completed tasks'
+        ]}
+
+def save_settings(settings):
+    with open('settings.json', 'w') as f:
+        json.dump(settings, f)
+
+
 def main():
     init_db()
     while True:
+        current_settings = load_settings()
+        menu_items = current_settings['menu_items'] + ['Settings', 'Exit']
+        
         questions = [
-            {'type': 'list', 'name': 'choice', 'message': 'Task Reminder CLI Tool', 'choices': [
-                'Add a task', 'Complete a task', 'Edit a task', 'List all tasks', 'View tasks due today',
-                'Search tasks', 'Show task statistics', 'Generate completion graph', 'Remove completed tasks', 'Exit'
-            ]}
+            {'type': 'list', 'name': 'choice', 'message': 'Task Reminder CLI Tool', 'choices': menu_items}
         ]
         choice = prompt(questions)['choice']
         
@@ -468,6 +624,8 @@ def main():
             generate_completion_graph()
         elif choice == 'Remove completed tasks':
             cleanup_completed_tasks()
+        elif choice == 'Settings':
+            settings()
         elif choice == 'Exit':
             break
         time.sleep(2)
