@@ -6,6 +6,7 @@ from colorama import Fore, Style, init
 import matplotlib.pyplot as plt
 from collections import defaultdict
 import json
+import csv
 
 DB_FILE = 'tasks.db'
 init(autoreset=True)
@@ -555,45 +556,112 @@ def generate_completion_graph():
 def settings():
     current_settings = load_settings()
     
+    all_menu_items = [
+        'Add a task',
+        'Complete a task',
+        'Edit a task',
+        'List all tasks',
+        'View tasks due today',
+        'Search tasks',
+        'Show task statistics',
+        'Generate completion graph',
+        'Remove completed tasks',
+        'Export tasks',
+        'Import tasks'
+    ]
+    
     setting_questions = [
-        {'type': 'checkbox', 'name': 'menu_items', 'message': 'Select menu items to display:', 'choices': [
-            'Add a task',
-            'Complete a task',
-            'Edit a task',
-            'List all tasks',
-            'View tasks due today',
-            'Search tasks',
-            'Show task statistics',
-            'Generate completion graph',
-            'Remove completed tasks'
-        ], 'default': current_settings['menu_items']}
+        {
+            'type': 'checkbox',
+            'name': 'menu_items',
+            'message': 'Toggle menu items to display:',
+            'choices': [
+                {
+                    'name': item,
+                    'value': item,
+                    'checked': item in current_settings['menu_items']
+                } for item in all_menu_items
+            ]
+        }
     ]
     
     new_settings = prompt(setting_questions)
     save_settings(new_settings)
     print("Settings updated successfully.")
 
+def export_tasks():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM tasks')
+    tasks = cursor.fetchall()
+    conn.close()
+
+    if not tasks:
+        print("No tasks to export.")
+        return
+
+    filename = input("Enter filename to export tasks (e.g., tasks.csv): ")
+    with open(filename, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['ID', 'Name', 'Due Date', 'Due Time', 'Priority', 'Tags', 'Completed', 'Repeatable', 'Repeat Interval', 'Completed Dates', 'Notes'])
+        writer.writerows(tasks)
+
+    print(f"Tasks exported to {filename}")
+
+def import_tasks():
+    filename = input("Enter the filename to import tasks from (e.g., tasks.csv): ")
+    try:
+        with open(filename, 'r') as csvfile:
+            reader = csv.reader(csvfile)
+            headers = next(reader)
+            
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            
+            for row in reader:
+                cursor.execute('''
+                    INSERT INTO tasks (name, due_date, due_time, priority, tags, completed, repeatable, repeat_interval, completed_dates)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (row[1], row[2], row[3], row[4], row[5], int(row[6]), int(row[7]), row[8], row[9]))
+            
+            conn.commit()
+            conn.close()
+            print(f"Tasks imported successfully from {filename}")
+    except FileNotFoundError:
+        print(f"File {filename} not found.")
+    except csv.Error as e:
+        print(f"Error reading CSV file: {e}")
+    except sqlite3.Error as e:
+        print(f"Error inserting data into database: {e}")
+
+def get_default_menu_items():
+    return [
+        'Add a task',
+        'Complete a task',
+        'Edit a task',
+        'List all tasks',
+        'View tasks due today',
+        'Search tasks',
+        'Show task statistics',
+        'Generate completion graph',
+        'Remove completed tasks',
+        'Export tasks',
+        'Import tasks'
+    ]
+
 def load_settings():
     try:
         with open('settings.json', 'r') as f:
-            return json.load(f)
+            settings = json.load(f)
+            if 'menu_items' not in settings:
+                settings['menu_items'] = get_default_menu_items()
+            return settings
     except FileNotFoundError:
-        return {'menu_items': [
-            'Add a task',
-            'Complete a task',
-            'Edit a task',
-            'List all tasks',
-            'View tasks due today',
-            'Search tasks',
-            'Show task statistics',
-            'Generate completion graph',
-            'Remove completed tasks'
-        ]}
+        return {'menu_items': get_default_menu_items()}
 
 def save_settings(settings):
     with open('settings.json', 'w') as f:
-        json.dump(settings, f)
-
+        json.dump(settings, f, indent=2)
 
 def main():
     init_db()
@@ -624,6 +692,10 @@ def main():
             generate_completion_graph()
         elif choice == 'Remove completed tasks':
             cleanup_completed_tasks()
+        elif choice == 'Export tasks':
+            export_tasks()
+        elif choice == 'Import tasks':
+            import_tasks()
         elif choice == 'Settings':
             settings()
         elif choice == 'Exit':
