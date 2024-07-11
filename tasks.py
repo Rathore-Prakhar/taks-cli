@@ -5,11 +5,16 @@ import time
 from colorama import Fore, Style, init
 import matplotlib.pyplot as plt
 from collections import defaultdict
+from pync import Notifier
 import json
 import csv
+import threading
 
 DB_FILE = 'tasks.db'
 init(autoreset=True)
+
+def send_notification(task_name, due_time):
+    Notifier.notify(f'Task "{task_name}" is due at {due_time}', title='Task Reminder')
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -30,6 +35,30 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+
+def check_upcoming_tasks():
+    while True:
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            current_time = datetime.now()
+            reminder_time = current_time + timedelta(minutes=30)
+            cursor.execute('''
+                SELECT name, due_date, due_time
+                FROM tasks
+                WHERE completed = 0 AND datetime(due_date || " " || due_time) BETWEEN ? AND ?
+            ''', (current_time.strftime("%Y-%m-%d %H:%M"), reminder_time.strftime("%Y-%m-%d %H:%M")))
+            upcoming_tasks = cursor.fetchall()
+            conn.close()
+
+            for task in upcoming_tasks:
+                task_name = task[0]
+                due_datetime = f"{task[1]} {task[2]}"
+                send_notification(task_name, due_datetime)
+
+            time.sleep(120)  # check every minute 2 mins
+        except sqlite3.Error as e:
+            print(f"An error occurred: {e}")
 
 def validate_date(date_text):
     try:
@@ -701,6 +730,9 @@ def main():
         elif choice == 'Exit':
             break
         time.sleep(2)
+
+notification_thread = threading.Thread(target=check_upcoming_tasks, daemon=True)
+notification_thread.start()
 
 if __name__ == '__main__':
     try:
