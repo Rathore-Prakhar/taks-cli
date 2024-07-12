@@ -23,6 +23,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
+            description TEXT,
             due_date TEXT NOT NULL,
             due_time TEXT NOT NULL,
             priority TEXT NOT NULL,
@@ -56,7 +57,7 @@ def check_upcoming_tasks():
                 due_datetime = f"{task[1]} {task[2]}"
                 send_notification(task_name, due_datetime)
 
-            time.sleep(120)  # check every minute 2 mins
+            time.sleep(120)  # check every 2 mins
         except sqlite3.Error as e:
             print(f"An error occurred: {e}")
 
@@ -98,6 +99,7 @@ def add_task():
 
     questions = [
         {'type': 'input', 'name': 'name', 'message': 'Enter the task name:'},
+        {'type': 'input', 'name': 'description', 'message': 'Enter the task description:'},
         {'type': 'input', 'name': 'due_date', 'message': f'Enter the due date (YYYY-MM-DD) or leave blank (current: {current_date}):', 'default': current_date},
         {'type': 'input', 'name': 'due_hour', 'message': 'Enter the due hour (1-12) or leave blank:', 'default': '12'},
         {'type': 'input', 'name': 'due_minute', 'message': 'Enter the due minute (00-59) or leave blank:', 'default': '00'},
@@ -149,9 +151,9 @@ def add_task():
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO tasks (name, due_date, due_time, priority, tags, repeatable, repeat_interval, completed_dates)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (answers['name'], answers['due_date'], due_time, answers['priority'], tags, int(answers['repeatable']), answers.get('repeat_interval', None), ""))
+            INSERT INTO tasks (name, description, due_date, due_time, priority, tags, repeatable, repeat_interval, completed_dates)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (answers['name'], answers['description'], answers['due_date'], due_time, answers['priority'], tags, int(answers['repeatable']), answers.get('repeat_interval', None), ""))
         conn.commit()
         conn.close()
         print(f'Task "{answers["name"]}" added.')
@@ -211,16 +213,14 @@ def complete_task():
                     next_due_date += timedelta(days=7)
                 next_due_date_str = next_due_date.strftime("%Y-%m-%d")
                 cursor.execute('''
-                    INSERT INTO tasks (name, due_date, due_time, priority, tags, repeatable, repeat_interval, completed_dates)
-                    SELECT name, ?, due_time, priority, tags, repeatable, repeat_interval, ""
+                    INSERT INTO tasks (name, description, due_date, due_time, priority, tags, repeatable, repeat_interval, completed_dates)
+                    SELECT name, description, ?, due_time, priority, tags, repeatable, repeat_interval, ""
                     FROM tasks WHERE id = ?
                 ''', (next_due_date_str, task_id))
 
-            print(f'Task "{task_name}" marked as completed.')
-
         conn.commit()
         conn.close()
-        print(f'{len(selected_task_ids)} task(s) marked as completed.')
+        print("Selected tasks completed.")
     except sqlite3.Error as e:
         print(f"An error occurred: {e}")
 
@@ -452,27 +452,46 @@ def view_today_tasks():
         print(f" - {task[0]} (Due: {task[1]}) [Priority: {task[2]}]")
 
 def search_tasks():
-    search_question = [{'type': 'input', 'name': 'query', 'message': 'Enter search query:'}]
-    search_answer = prompt(search_question)
-    query = search_answer['query']
+    questions = [
+        {'type': 'input', 'name': 'keyword', 'message': 'Enter keyword to search in task name or description:'},
+        {'type': 'input', 'name': 'tag', 'message': 'Enter tag to search or leave blank:'},
+        {'type': 'confirm', 'name': 'include_completed', 'message': 'Include completed tasks?', 'default': False},
+    ]
+    answers = prompt(questions)
+    keyword = answers['keyword']
+    tag = answers['tag']
+    include_completed = answers['include_completed']
+
+    query = '''
+        SELECT id, name, description, due_date, due_time, priority, tags, completed
+        FROM tasks
+        WHERE (name LIKE ? OR description LIKE ?)
+    '''
+    params = [f'%{keyword}%', f'%{keyword}%']
+
+    if tag:
+        query += ' AND tags LIKE ?'
+        params.append(f'%{tag}%')
+
+    if not include_completed:
+        query += ' AND completed = 0'
 
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute('SELECT name, due_date, due_time, priority FROM tasks WHERE name LIKE ? AND completed = 0', (f'%{query}%',))
-        tasks = cursor.fetchall()
+        cursor.execute(query, params)
+        results = cursor.fetchall()
         conn.close()
     except sqlite3.Error as e:
         print(f"An error occurred: {e}")
         return
 
-    if not tasks:
-        print("No matching tasks found.")
-        return
-
-    print("Matching tasks:")
-    for task in tasks:
-        print(f" - {task[0]} (Due: {task[1]} {task[2]}) [Priority: {task[3]}]")
+    if not results:
+        print("No tasks found.")
+    else:
+        for task in results:
+            status = "Completed" if task[7] else "Pending"
+            print(f"ID: {task[0]}, Name: {task[1]}, Description: {task[2]}, Due: {task[3]} {task[4]}, Priority: {task[5]}, Tags: {task[6]}, Status: {status}")
 
 def generate_completion_graph():
     try:
@@ -619,23 +638,54 @@ def settings():
     print("Settings updated successfully.")
 
 def export_tasks():
+    questions = [
+        {'type': 'list', 'name': 'format', 'message': 'Select export format:', 'choices': ['CSV', 'JSON']}
+    ]
+    answers = prompt(questions)
+    export_format = answers['format']
+
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM tasks')
+    cursor.execute('SELECT name, description, due_date, due_time, priority, tags, completed, repeatable, repeat_interval, completed_dates FROM tasks')
     tasks = cursor.fetchall()
     conn.close()
 
-    if not tasks:
-        print("No tasks to export.")
-        return
-
-    filename = input("Enter filename to export tasks (e.g., tasks.csv): ")
-    with open(filename, 'w', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(['ID', 'Name', 'Due Date', 'Due Time', 'Priority', 'Tags', 'Completed', 'Repeatable', 'Repeat Interval', 'Completed Dates', 'Notes'])
-        writer.writerows(tasks)
-
-    print(f"Tasks exported to {filename}")
+    if export_format == 'CSV':
+        with open('tasks_export.csv', 'w', newline='') as csvfile:
+            fieldnames = ['Name', 'Description', 'Due Date', 'Due Time', 'Priority', 'Tags', 'Completed', 'Repeatable', 'Repeat Interval', 'Completed Dates']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for task in tasks:
+                writer.writerow({
+                    'Name': task[0],
+                    'Description': task[1],
+                    'Due Date': task[2],
+                    'Due Time': task[3],
+                    'Priority': task[4],
+                    'Tags': task[5],
+                    'Completed': task[6],
+                    'Repeatable': task[7],
+                    'Repeat Interval': task[8],
+                    'Completed Dates': task[9]
+                })
+    elif export_format == 'JSON':
+        with open('tasks_export.json', 'w') as jsonfile:
+            task_list = []
+            for task in tasks:
+                task_list.append({
+                    'Name': task[0],
+                    'Description': task[1],
+                    'Due Date': task[2],
+                    'Due Time': task[3],
+                    'Priority': task[4],
+                    'Tags': task[5],
+                    'Completed': task[6],
+                    'Repeatable': task[7],
+                    'Repeat Interval': task[8],
+                    'Completed Dates': task[9]
+                })
+            json.dump(task_list, jsonfile, indent=4)
+    print(f'Tasks exported to tasks_export.{export_format.lower()}.')
 
 def import_tasks():
     filename = input("Enter the filename to import tasks from (e.g., tasks.csv): ")
@@ -736,6 +786,7 @@ notification_thread.start()
 
 if __name__ == '__main__':
     try:
+        init_db()
         main()
     except KeyboardInterrupt:
         print("\nProcess interrupted. Exiting.")
